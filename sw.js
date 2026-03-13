@@ -1,28 +1,24 @@
-// ตั้งชื่อ Cache และกำหนดเวอร์ชัน (ถ้าแก้โค้ดหน้าเว็บ ควรมาเปลี่ยนเลขเวอร์ชันตรงนี้)
-const CACHE_NAME = 'vpos-v11-pro-cache-v1';
+const CACHE_NAME = 'vpos-v12-pro-cache';
 
-// รายชื่อไฟล์และลิงก์ CDN ทั้งหมดที่ต้องดูดเก็บไว้ตั้งแต่วันแรกที่เปิดแอป (มีเน็ต)
-const STATIC_ASSETS = [
+// 1. ตะกร้า VIP: เก็บเฉพาะไฟล์ในเครื่อง (รับประกันว่าโหลดผ่านแน่นอน 100%)
+const LOCAL_ASSETS = [
   './',
   './index.html',
-  './manifest.json',
-  // พลังของ Offline อยู่ตรงนี้: สั่งเก็บ CDN สำคัญลงเครื่อง
-  'https://cdn.tailwindcss.com',
-  'https://unpkg.com/html5-qrcode',
-  'https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;800;900&display=swap'
+  './manifest.json'
 ];
 
-// 1. ขั้นตอน Install: ติดตั้งและดูดไฟล์ทั้งหมดลง Cache
+// ขั้นตอน Install: ติดตั้งและเก็บไฟล์ VIP ลง Cache ทันที
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(cache => {
-      console.log('[Service Worker] Caching Static Assets');
-      return cache.addAll(STATIC_ASSETS);
-    }).then(() => self.skipWaiting()) // บังคับให้ Service Worker ตัวใหม่เริ่มงานทันทีไม่ต้องรอ
+      console.log('[Service Worker] Caching Local VIP Assets');
+      return cache.addAll(LOCAL_ASSETS);
+    })
   );
+  self.skipWaiting(); // บังคับให้ Service Worker ตัวใหม่เข้าทำงานทันทีไม่ต้องรอ
 });
 
-// 2. ขั้นตอน Activate: ทำความสะอาด Cache เก่า (สำคัญมากเวลาคุณอัปเดตแอป)
+// ขั้นตอน Activate: ล้าง Cache เก่าๆ ทิ้งเมื่อมีการอัปเดตเวอร์ชัน
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(cacheNames => {
@@ -30,45 +26,48 @@ self.addEventListener('activate', event => {
         cacheNames.map(cache => {
           if (cache !== CACHE_NAME) {
             console.log('[Service Worker] Clearing Old Cache:', cache);
-            return caches.delete(cache); // ลบถังเก่าทิ้ง
+            return caches.delete(cache);
           }
         })
       );
-    }).then(() => self.clients.claim()) // ให้ Service Worker เข้าคุมหน้าเว็บทันที
+    })
   );
+  self.clients.claim(); // ให้ Service Worker เข้าควบคุมหน้าเว็บทันที
 });
 
-// 3. ขั้นตอน Fetch: ดักจับการเรียกไฟล์ (หัวใจหลักตอน Offline)
+// ขั้นตอน Fetch: หัวใจหลักของการดักจับไฟล์ตอน Offline และ Runtime Caching
 self.addEventListener('fetch', event => {
-  // ข้ามการดักจับถ้าเป็น API หรือไม่ใช่การดึงข้อมูลปกติ (GET)
+  // ข้ามการดักจับถ้าไม่ใช่คำสั่งดึงข้อมูลแบบ GET (ป้องกันการรบกวนระบบอื่น)
   if (event.request.method !== 'GET') return;
 
   event.respondWith(
     caches.match(event.request).then(cachedResponse => {
-      // 3.1 เจอของใน Cache -> ส่งคืนไปเลย (ทำงานตอน Offline ได้ทันที)
+      // 1. ถ้ามีไฟล์ใน Cache อยู่แล้ว ให้คายออกมาเลย (ทำงานออฟไลน์ได้ทันที)
       if (cachedResponse) {
         return cachedResponse;
       }
 
-      // 3.2 ไม่เจอใน Cache -> ลองไปดึงจากเน็ตดู
+      // 2. ถ้ายังไม่มีใน Cache ให้ลองวิ่งไปดึงจากเน็ตดู
       return fetch(event.request).then(networkResponse => {
-        // เช็คว่าการดึงข้อมูลสมบูรณ์ไหม ถ้าไม่สมบูรณ์ก็คืนค่าไปตามปกติ
-        if (!networkResponse || networkResponse.status !== 200 || (networkResponse.type !== 'basic' && networkResponse.type !== 'cors')) {
+        // เช็คว่าดึงจากเน็ตสำเร็จสมบูรณ์ไหม
+        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type === 'error') {
           return networkResponse;
         }
 
-        // 3.3 Runtime Caching: แอบเก็บไฟล์ใหม่ที่เพิ่งโหลดมาลง Cache ด้วย
-        // (เช่น พวกไฟล์ฟอนต์ .woff2 ที่ Google Fonts แอบไปดึงมาอีกทอดนึง)
-        const responseToCache = networkResponse.clone();
-        caches.open(CACHE_NAME).then(cache => {
-          cache.put(event.request, responseToCache);
-        });
+        // 3. Runtime Caching: แอบเก็บไฟล์จากเน็ต (เช่น Tailwind, Fonts) ลงถังอัตโนมัติ
+        // จำเป็นต้องใช้ clone() เพราะข้อมูล response จะถูกอ่านได้แค่ครั้งเดียว
+        if (event.request.url.startsWith('http')) {
+            const responseToCache = networkResponse.clone();
+            caches.open(CACHE_NAME).then(cache => {
+              cache.put(event.request, responseToCache);
+            });
+        }
 
         return networkResponse;
       }).catch(() => {
-        // กรณี Offline เต็มตัวและหาไฟล์ไม่เจอจริงๆ
-        // ระบบจะเงียบๆ ไว้ ไม่ให้แอป Crash 
-        console.log('[Service Worker] Offline & No Cache Found for:', event.request.url);
+        // 4. กรณี Offline เต็มตัว และหาไฟล์ไหนไม่เจอเลยจริงๆ
+        // ส่ง Response ว่างๆ กลับไป เพื่อไม่ให้แอปเกิดอาการช็อคตาย (Freeze)
+        return new Response('', { status: 404, statusText: 'Offline Fallback' });
       });
     })
   );
