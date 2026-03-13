@@ -245,11 +245,12 @@
         if(!db.settings.dbId) { db.settings.dbId = generateDBID(); localStorage.setItem('village_pos_v11_pro', JSON.stringify(db)); }
 
         let cart = []; 
-        let isAdmin = localStorage.getItem('vpos_admin') === 'true'; // <--- เปลี่ยนมาใช้ localStorage
+        let isAdmin = localStorage.getItem('vpos_admin') === 'true'; 
         let currentRange = 'today'; let compressedImageBase64 = "";
         let audioCtx; let recognition; let isListening = false; let html5QrScanner = null;
         let customerWindow = null; 
-        let lastSpeechTime = 0; let lastSpeechText = ""; // <--- เพิ่มตัวแปรดักเสียงเบิ้ล
+        
+        let isProcessingVoice = false; // ตัวแปรล็อคเสียงเบิ้ล
 
         function saveDB() { try { localStorage.setItem('village_pos_v11_pro', JSON.stringify(db)); } catch(e) { alert("ความจำเต็ม! แนะนำให้สำรองข้อมูลและล้างประวัติยอดขาย"); } }
 
@@ -368,7 +369,6 @@
             const osc = audioCtx.createOscillator(); const g = audioCtx.createGain();
             osc.connect(g); g.connect(audioCtx.destination);
             
-            // <--- ลดความดังเริ่มต้นจาก 1.0 เป็น 0.2 ตรงนี้ครับ
             g.gain.setValueAtTime(0.07, audioCtx.currentTime); 
             
             if(type === 'success') { osc.type = 'square'; osc.frequency.setValueAtTime(800, audioCtx.currentTime); g.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1); osc.start(); osc.stop(audioCtx.currentTime + 0.1); } 
@@ -379,35 +379,62 @@
         function toggleVoice() {
             if(!('webkitSpeechRecognition' in window)) return alert("เบราว์เซอร์ไม่รองรับเสียง");
             if(!recognition) {
-                recognition = new webkitSpeechRecognition(); recognition.lang = 'th-TH'; recognition.interimResults = true; recognition.continuous = true;
+                recognition = new webkitSpeechRecognition(); 
+                recognition.lang = 'th-TH'; 
+                recognition.interimResults = false; // ปิดผลลัพธ์ระหว่างพูดเพื่อกันเบิ้ล
+                recognition.continuous = true;
+                
                 recognition.onresult = (event) => {
+                    if (isProcessingVoice) return; // ติดล็อคอยู่ ห้ามรับคำสั่งเพิ่ม
+                    
                     for (let i = event.resultIndex; i < event.results.length; ++i) {
                         if (event.results[i].isFinal) {
                             const text = event.results[i][0].transcript.trim().toLowerCase();
                             
-                            // <--- ระบบ Debounce กันเสียงเบิ้ล (ถ้าพูดคำเดิมใน 2 วิ จะโดนข้าม)
-                            const now = Date.now();
-                            if (text === lastSpeechText && (now - lastSpeechTime) < 2000) {
-                                continue; 
-                            }
-                            lastSpeechText = text;
-                            lastSpeechTime = now;
-                            // -----------------------------------------------------
-
-                            let p = text; const thaiNums = {'หนึ่ง':1,'สอง':2,'สาม':3,'สี่':4,'ห้า':5,'หก':6,'เจ็ด':7,'แปด':8,'เก้า':9,'สิบ':10};
+                            isProcessingVoice = true; // ล็อคระบบ
+                            
+                            let p = text; 
+                            const thaiNums = {'หนึ่ง':1,'สอง':2,'สาม':3,'สี่':4,'ห้า':5,'หก':6,'เจ็ด':7,'แปด':8,'เก้า':9,'สิบ':10};
                             for(let [k,v] of Object.entries(thaiNums)) p = p.replace(k, v);
                             const match = p.match(/(.*?)\s*(\d+)?$/);
+                            
                             if(match) {
-                                const item = db.inventory.find(inv => inv.name.toLowerCase().includes(match[1].trim()));
-                                if(item) { for(let n=0; n<parseInt(match[2] || 1); n++) addToCart(item.id); } else playSound('warn');
+                                const spokenName = match[1].trim();
+                                const itemQty = parseInt(match[2] || 1);
+                                
+                                // หาของที่ชื่อ "ตรงเป๊ะ" ก่อน
+                                let item = db.inventory.find(inv => inv.name.toLowerCase() === spokenName);
+                                
+                                // ถ้าหาไม่เจอ ค่อยหาแบบ "มีคำนี้อยู่ในชื่อ"
+                                if(!item) {
+                                    item = db.inventory.find(inv => inv.name.toLowerCase().includes(spokenName));
+                                }
+
+                                if(item) { 
+                                    for(let n=0; n<itemQty; n++) addToCart(item.id); 
+                                } else {
+                                    playSound('warn');
+                                }
                             }
+                            
+                            // ปลดล็อคระบบหลังผ่านไป 1.5 วินาที
+                            setTimeout(() => {
+                                isProcessingVoice = false;
+                            }, 1500);
                         }
                     }
                 };
                 recognition.onend = () => { if(isListening) recognition.start(); };
             }
-            if(isListening) { isListening = false; recognition.stop(); document.getElementById('voice-btn').classList.remove('mic-active'); }
-            else { isListening = true; recognition.start(); document.getElementById('voice-btn').classList.add('mic-active'); }
+            if(isListening) { 
+                isListening = false; 
+                recognition.stop(); 
+                document.getElementById('voice-btn').classList.remove('mic-active'); 
+            } else { 
+                isListening = true; 
+                recognition.start(); 
+                document.getElementById('voice-btn').classList.add('mic-active'); 
+            }
         }
 
         function generateQR() {
@@ -452,7 +479,6 @@
             if(isAdmin) { alert("คุณอยู่ในระบบ Admin แล้ว"); } else {
                 const p = prompt("รหัส Admin:"); 
                 if(p === db.settings.password) { 
-                    // <--- เปลี่ยน sessionStorage เป็น localStorage
                     isAdmin = true; localStorage.setItem('vpos_admin', 'true'); 
                     document.getElementById('admin-btn').innerText = '🔓 ADMIN'; 
                     document.getElementById('btn-clear-sales').classList.remove('hidden');
@@ -460,7 +486,6 @@
             }
         }
         
-        // <--- เปลี่ยน sessionStorage เป็น localStorage ตอน Logout
         function logoutAdmin() { isAdmin = false; localStorage.removeItem('vpos_admin'); alert("ออกจากระบบ Admin เรียบร้อย"); location.reload(); } 
         function checkAdminAccess(p) { if(isAdmin) showPage(p); else alert("เข้าสู่ระบบ (Login) ก่อนครับ!"); }
         function clearAllSales() { if(!isAdmin) return alert("เฉพาะ Admin"); if(confirm("⚠️ ล้างยอดขายทั้งหมด จะไม่สามารถกู้คืนได้ ยืนยันไหม?")) { db.sales = []; saveDB(); renderReport(); alert("ล้างเรียบร้อย"); } }
@@ -543,7 +568,6 @@
             });
         }
 
-        // --- คงเวอร์ชันที่คุณบอกว่าดีไว้แบบเดิม 100% ---
         function addToCart(id) { const i = db.inventory.find(x => x.id === id); if(i) { const ex = cart.find(c => c.id === id); if(ex) ex.count = (ex.count || 1) + 1; else cart.push({...i, cartId: Date.now(), count: 1}); playSound('success'); updateCartUI(); } }
 
         function updateCartUI() {
